@@ -1,0 +1,320 @@
+-- ==============================================================================
+-- OMEGA AUTONOMOUS CORE [BLOX FRUITS]
+-- Desenvolvido para Delta Executor | Pathfinding Bézier, Matriz AI e Server Hop
+-- ==============================================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local Camera = Workspace.CurrentCamera
+
+local player = Players.LocalPlayer
+getgenv().OmegaCoreAtivo = false
+
+-- ==============================================================================
+-- [1] MATRIZ DE PRIORIDADES (CONFIGURAÇÃO DE ALVOS)
+-- ==============================================================================
+local PRIORIDADES = {
+    Frutas = true,      -- Prioridade Máxima
+    Bosses = {          -- Prioridade Alta
+        "Hellfire Gas", 
+        "Saber Expert", 
+        "rip_indra True Form"
+    },
+    Eventos = {         -- Prioridade Média
+        "Pumpkin"
+    },
+    MudarServidorVazio = true -- Se não achar nada acima, pula de servidor
+}
+
+-- ==============================================================================
+-- [2] DRAWING API (RADAR INVISÍVEL)
+-- ==============================================================================
+-- Cria um painel na tela totalmente invisível ao Anti-Cheat (Renderizado na GPU)
+local InfoTexto = Drawing.new("Text")
+InfoTexto.Visible = true
+InfoTexto.Position = Vector2.new(50, 200)
+InfoTexto.Color = Color3.fromRGB(0, 255, 255)
+InfoTexto.Size = 22
+InfoTexto.Center = false
+InfoTexto.Outline = true
+InfoTexto.Font = 2
+InfoTexto.Text = "[ Omega Core ]: Aguardando Ativação..."
+
+local function AtualizarRadar(estado, alvoNome, distancia)
+    if getgenv().OmegaCoreAtivo then
+        local msg = "[ Omega Core Ativo ]\n"
+        msg = msg .. "Estado: " .. estado .. "\n"
+        if alvoNome then
+            msg = msg .. "Alvo Atual: " .. alvoNome .. " (" .. math.floor(distancia) .. "m)"
+        else
+            msg = msg .. "Buscando alvos..."
+        end
+        InfoTexto.Text = msg
+        InfoTexto.Color = Color3.fromRGB(50, 255, 50)
+    else
+        InfoTexto.Text = "[ Omega Core ]: Desligado"
+        InfoTexto.Color = Color3.fromRGB(255, 50, 50)
+    end
+end
+
+-- ==============================================================================
+-- [3] MOTOR DE VOO INDETECTÁVEL (CURVAS DE BÉZIER)
+-- ==============================================================================
+-- Fórmula Matemática Bézier Quadrática: P(t) = (1-t)^2*P0 + 2(1-t)t*P1 + t^2*P2
+local function CalcularPontoBezier(t, p0, p1, p2)
+    return (1 - t)^2 * p0 + 2 * (1 - t) * t * p1 + t^2 * p2
+end
+
+local noclipCon
+local function VooInteligenteBezier(targetCFrame)
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+    local hrp = char.HumanoidRootPart
+
+    -- Configura Noclip local para a viagem
+    if noclipCon then noclipCon:Disconnect() end
+    noclipCon = RunService.Stepped:Connect(function()
+        if char then
+            for _, p in pairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then p.CanCollide = false end
+            end
+            hrp.Velocity = Vector3.new(0, 0, 0)
+        end
+    end)
+
+    local startPos = hrp.Position
+    local endPos = targetCFrame.Position
+    local distance = (startPos - endPos).Magnitude
+    
+    -- Se estiver muito perto, não precisa de curva
+    if distance < 30 then
+        hrp.CFrame = targetCFrame
+        if noclipCon then noclipCon:Disconnect() end
+        return true
+    end
+
+    -- Cria um ponto de controle aleatório no alto e pro lado para criar a curva do arco
+    local offset = Vector3.new(math.random(-150, 150), math.random(100, 300), math.random(-150, 150))
+    local controlPoint = startPos:Lerp(endPos, 0.5) + offset
+
+    local tempoTotal = distance / 320 -- Velocidade base (ajuste se kikar)
+    local tempoPassado = 0
+
+    while tempoPassado < tempoTotal do
+        if not getgenv().OmegaCoreAtivo then break end
+        
+        tempoPassado = tempoPassado + RunService.Heartbeat:Wait()
+        local t = math.clamp(tempoPassado / tempoTotal, 0, 1)
+        
+        -- Interpolação de velocidade suave (Easing InOutQuad)
+        local tOtimizado = t < 0.5 and 2 * t * t or 1 - math.pow(-2 * t + 2, 2) / 2
+        
+        local novaPos = CalcularPontoBezier(tOtimizado, startPos, controlPoint, endPos)
+        hrp.CFrame = CFrame.new(novaPos, endPos) -- Voa olhando para o destino
+    end
+
+    if noclipCon then noclipCon:Disconnect() end
+    return getgenv().OmegaCoreAtivo
+end
+
+-- ==============================================================================
+-- [4] SISTEMA MEMORY-LEAK FREE SERVER HOP (PERSISTÊNCIA)
+-- ==============================================================================
+local function ExecutarServerHop()
+    AtualizarRadar("Mudando de Servidor...", "Procurando mundo novo", 0)
+    local Http = game:GetService("HttpService")
+    local TPS = game:GetService("TeleportService")
+    local ApiUrl = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+    
+    -- Gerencia o arquivo JSON de servidores visitados usando as funções do Executor
+    local visitedFile = "OmegaCore_Visited.json"
+    local visited = {}
+    
+    if isfile and isfile(visitedFile) then
+        local data = readfile(visitedFile)
+        local success, result = pcall(function() return Http:JSONDecode(data) end)
+        if success then visited = result end
+    end
+    
+    -- Limpa lista se ficar muito grande (>50) para evitar arquivo gigante
+    if #visited > 50 then visited = {} end
+    table.insert(visited, game.JobId)
+    
+    if writefile then
+        writefile(visitedFile, Http:JSONEncode(visited))
+    end
+
+    local function Hop()
+        local servers = Http:JSONDecode(game:HttpGet(ApiUrl))
+        if servers and servers.data then
+            for _, srv in pairs(servers.data) do
+                if type(srv) == "table" and srv.playing < srv.maxPlayers - 1 and srv.id ~= game.JobId then
+                    local jaVisitou = false
+                    for _, id in pairs(visited) do
+                        if id == srv.id then jaVisitou = true break end
+                    end
+                    
+                    if not jaVisitou then
+                        TPS:TeleportToPlaceInstance(game.PlaceId, srv.id, player)
+                        task.wait(5)
+                    end
+                end
+            end
+        end
+    end
+
+    pcall(Hop)
+    task.wait(3) -- Cooldown se falhar
+end
+
+-- ==============================================================================
+-- [5] CÉREBRO DA IA (DECISÃO E ATAQUE)
+-- ==============================================================================
+local function SimularAtaque()
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    for _, key in ipairs({Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V}) do
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end
+end
+
+local function ObterMelhorAlvo()
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local hrp = char.HumanoidRootPart
+
+    -- 1. Checa Frutas dropadas no chão
+    if PRIORIDADES.Frutas then
+        for _, obj in pairs(Workspace:GetChildren()) do
+            if obj:IsA("Tool") and string.find(obj.Name, "Fruit") then
+                return {Tipo = "Fruta", Part = obj.Handle, Alvo = obj}
+            end
+        end
+    end
+
+    -- 2. Checa Bosses
+    if Workspace:FindFirstChild("Enemies") then
+        for _, enemy in pairs(Workspace.Enemies:GetChildren()) do
+            for _, bossNome in ipairs(PRIORIDADES.Bosses) do
+                if string.find(enemy.Name, bossNome) and enemy:FindFirstChild("Humanoid") and enemy.Humanoid.Health > 0 then
+                    return {Tipo = "Boss", Part = enemy:FindFirstChild("HumanoidRootPart"), Alvo = enemy}
+                end
+            end
+        end
+    end
+
+    -- 3. Checa Eventos (Pumpkins, etc)
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        for _, evt in ipairs(PRIORIDADES.Eventos) do
+            if obj.Name == evt then
+                local tPart = obj:IsA("Model") and obj.PrimaryPart or (obj:IsA("BasePart") and obj or nil)
+                if tPart then
+                    return {Tipo = "Evento", Part = tPart, Alvo = obj}
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function IniciarCerebro()
+    while getgenv().OmegaCoreAtivo do
+        local char = player.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then task.wait(1) continue end
+        local hrp = char.HumanoidRootPart
+
+        local decisao = ObterMelhorAlvo()
+
+        if decisao then
+            local dist = (hrp.Position - decisao.Part.Position).Magnitude
+            AtualizarRadar("Caçando", decisao.Alvo.Name, dist)
+
+            if dist > 20 then
+                -- O deslocamento curvo (Bézier) evita triggers geométricos de hackers
+                local alvoCFrame = decisao.Tipo == "Fruta" and decisao.Part.CFrame or decisao.Part.CFrame * CFrame.new(0, 8, 0)
+                VooInteligenteBezier(alvoCFrame)
+            else
+                -- Combate / Coleta
+                hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(decisao.Part.Position.X, hrp.Position.Y, decisao.Part.Position.Z))
+                if decisao.Tipo ~= "Fruta" then
+                    SimularAtaque()
+                end
+            end
+        else
+            if PRIORIDADES.MudarServidorVazio then
+                ExecutarServerHop()
+                task.wait(10) -- Aguarda o TeleportService
+            else
+                AtualizarRadar("Ocioso", "Nada encontrado", 0)
+            end
+        end
+        task.wait(0.1)
+    end
+    AtualizarRadar("Desligado", nil, 0)
+end
+
+-- ==============================================================================
+-- [6] INTERFACE DE USUÁRIO (TOGGLE BUTTON)
+-- ==============================================================================
+local UserInputService = game:GetService("UserInputService")
+local uiName = "OmegaCoreUI"
+if CoreGui:FindFirstChild(uiName) then CoreGui[uiName]:Destroy() end
+
+local screenGui = Instance.new("ScreenGui", CoreGui)
+screenGui.Name = uiName
+
+local toggleBtn = Instance.new("TextButton", screenGui)
+toggleBtn.Size = UDim2.new(0, 60, 0, 60)
+toggleBtn.Position = UDim2.new(0.5, -30, 0.1, 0)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+toggleBtn.Text = "O"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 50, 50)
+toggleBtn.Font = Enum.Font.Code
+toggleBtn.TextSize = 28
+toggleBtn.BorderSizePixel = 2
+toggleBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
+
+local corner = Instance.new("UICorner", toggleBtn)
+corner.CornerRadius = UDim.new(1, 0)
+
+-- Drag UI
+local dragging, dragInput, dragStart, startPos
+toggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = toggleBtn.Position
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+    end
+end)
+toggleBtn.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        toggleBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+toggleBtn.MouseButton1Click:Connect(function()
+    getgenv().OmegaCoreAtivo = not getgenv().OmegaCoreAtivo
+    if getgenv().OmegaCoreAtivo then
+        toggleBtn.TextColor3 = Color3.fromRGB(50, 255, 50)
+        toggleBtn.BorderColor3 = Color3.fromRGB(50, 255, 50)
+        task.spawn(IniciarCerebro)
+    else
+        toggleBtn.TextColor3 = Color3.fromRGB(255, 50, 50)
+        toggleBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
+        if noclipCon then noclipCon:Disconnect() end
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.Velocity = Vector3.new(0,0,0) end
+    end
+end)
